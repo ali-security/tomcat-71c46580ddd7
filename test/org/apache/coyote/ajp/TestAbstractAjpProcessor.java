@@ -569,6 +569,51 @@ public class TestAbstractAjpProcessor extends TomcatBaseTest {
     }
 
     @Test
+    public void testSecretNearMiss() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+        Assert.assertTrue(tomcat.getConnector().setProperty("secret", "RIGHTSECRET"));
+        tomcat.start();
+
+        // No file system docBase required
+        Context ctx = getProgrammaticRootContext();
+
+        Tomcat.addServlet(ctx, "helloWorld", new HelloWorldServlet());
+        ctx.addServletMappingDecoded("/", "helloWorld");
+
+        SimpleAjpClient ajpClient = new SimpleAjpClient();
+        ajpClient.setPort(getPort());
+
+        String[] wrongSecrets = new String[] { "RIGHTSECRES", "RIGHTSECRE", "RIGHTSECRETS", "rightsecret" };
+        for (String wrongSecret : wrongSecrets) {
+            ajpClient.connect();
+            validateCpong(ajpClient.cping());
+
+            TesterAjpMessage forwardMessage = ajpClient.createForwardMessage();
+            forwardMessage.addAttribute(0x0C, wrongSecret);
+            forwardMessage.end();
+
+            TesterAjpMessage responseHeaders = ajpClient.sendMessage(forwardMessage);
+            validateResponseHeaders(responseHeaders, 403, "403");
+            ajpClient.readMessage();
+            validateResponseEnd(ajpClient.readMessage(), false);
+        }
+
+        ajpClient.connect();
+        validateCpong(ajpClient.cping());
+
+        TesterAjpMessage forwardMessage = ajpClient.createForwardMessage();
+        forwardMessage.addAttribute(0x0C, "RIGHTSECRET");
+        forwardMessage.end();
+
+        TesterAjpMessage responseHeaders = ajpClient.sendMessage(forwardMessage);
+        validateResponseHeaders(responseHeaders, 200, "200");
+        validateResponseBody(ajpClient.readMessage(), HelloWorldServlet.RESPONSE_TEXT);
+        validateResponseEnd(ajpClient.readMessage(), true);
+
+        ajpClient.disconnect();
+    }
+
+    @Test
     public void testKeepAlive() throws Exception {
         Tomcat tomcat = getTomcatInstance();
         Assert.assertTrue(tomcat.getConnector().setProperty("connectionTimeout", "-1"));
