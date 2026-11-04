@@ -27,6 +27,7 @@ import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
 import java.security.Principal;
 import java.security.PrivateKey;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 
@@ -65,6 +66,9 @@ import org.apache.tomcat.util.descriptor.web.SecurityCollection;
 import org.apache.tomcat.util.descriptor.web.SecurityConstraint;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate.Type;
 import org.apache.tomcat.util.net.jsse.JSSEImplementation;
+import org.apache.tomcat.util.net.jsse.PEMFile;
+import org.apache.tomcat.util.net.openssl.OpenSSLConf;
+import org.apache.tomcat.util.net.openssl.OpenSSLConfCmd;
 import org.apache.tomcat.util.net.openssl.OpenSSLImplementation;
 import org.apache.tomcat.util.net.openssl.OpenSSLStatus;
 
@@ -87,6 +91,17 @@ public final class TesterSupport {
     public static final String LOCALHOST_EC_KEY_PEM = SSL_DIR + "localhost-ec-key.pem";
     public static final String LOCALHOST_RSA_CERT_PEM = SSL_DIR + "localhost-rsa-cert.pem";
     public static final String LOCALHOST_RSA_KEY_PEM = SSL_DIR + "localhost-rsa-key.pem";
+    /*
+     * CRL test material. The CA, the client certificates and the CRLs are all issued by a dedicated test CA.
+     * populated-crl.pem revokes user2-crl but not user1-crl. empty-crl.pem does not revoke any certificates.
+     */
+    public static final String CA_CRL_CERT_PEM = SSL_DIR + "ca-crl-cert.pem";
+    public static final String CLIENT_CRL_CERT_PEM = SSL_DIR + "user1-crl-cert.pem";
+    public static final String CLIENT_CRL_KEY_PEM = SSL_DIR + "user1-crl-key.pem";
+    public static final String CLIENT_CRL_REVOKED_CERT_PEM = SSL_DIR + "user2-crl-cert.pem";
+    public static final String CLIENT_CRL_REVOKED_KEY_PEM = SSL_DIR + "user2-crl-key.pem";
+    public static final String EMPTY_CRL = SSL_DIR + "empty-crl.pem";
+    public static final String POPULATED_CRL = SSL_DIR + "populated-crl.pem";
     public static final boolean TLSV13_AVAILABLE;
 
     public static final String ROLE = "testrole";
@@ -180,9 +195,13 @@ public final class TesterSupport {
     }
 
     protected static KeyManager[] getUser1KeyManagers() throws Exception {
+        return getUserKeyManagers(getKeyStore(CLIENT_JKS));
+    }
+
+    protected static KeyManager[] getUserKeyManagers(KeyStore keyStore) throws Exception {
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(
                 KeyManagerFactory.getDefaultAlgorithm());
-        kmf.init(getKeyStore(CLIENT_JKS), JKS_PASS.toCharArray());
+        kmf.init(keyStore, JKS_PASS.toCharArray());
         KeyManager[] managers = kmf.getKeyManagers();
         KeyManager manager;
         for (int i=0; i < managers.length; i++) {
@@ -210,18 +229,40 @@ public final class TesterSupport {
     public static ClientSSLSocketFactory configureClientSsl(boolean forceTls12) {
         ClientSSLSocketFactory clientSSLSocketFactory = null;
         try {
-            SSLContext sc;
-            if (TLSV13_AVAILABLE && !forceTls12) {
-                sc = SSLContext.getInstance(Constants.SSL_PROTO_TLSv1_3);
-            } else {
-                sc = SSLContext.getInstance(Constants.SSL_PROTO_TLSv1_2);
-            }
-            sc.init(getUser1KeyManagers(), getTrustManagers(), null);
-            clientSSLSocketFactory = new ClientSSLSocketFactory(sc.getSocketFactory());
-            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(clientSSLSocketFactory);
+            clientSSLSocketFactory = configureClientSsl(forceTls12, getUser1KeyManagers());
         } catch (Exception e) {
             e.printStackTrace();
         }
+        return clientSSLSocketFactory;
+    }
+
+    /**
+     * Configures the client to authenticate with the client certificate and private key held in the given PEM files.
+     *
+     * @param forceTls12     Should the client be limited to TLS 1.2
+     * @param certificatePem The PEM file containing the client certificate
+     * @param keyPem         The PEM file containing the private key for the client certificate
+     *
+     * @return The socket factory configured as the default for HTTPS connections
+     *
+     * @throws Exception If the client certificate or private key cannot be loaded
+     */
+    public static ClientSSLSocketFactory configureClientSsl(boolean forceTls12, String certificatePem, String keyPem)
+            throws Exception {
+        return configureClientSsl(forceTls12, getUserKeyManagers(getKeyStore(certificatePem, keyPem)));
+    }
+
+    private static ClientSSLSocketFactory configureClientSsl(boolean forceTls12, KeyManager[] keyManagers)
+            throws Exception {
+        SSLContext sc;
+        if (TLSV13_AVAILABLE && !forceTls12) {
+            sc = SSLContext.getInstance(Constants.SSL_PROTO_TLSv1_3);
+        } else {
+            sc = SSLContext.getInstance(Constants.SSL_PROTO_TLSv1_2);
+        }
+        sc.init(keyManagers, getTrustManagers(), null);
+        ClientSSLSocketFactory clientSSLSocketFactory = new ClientSSLSocketFactory(sc.getSocketFactory());
+        javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(clientSSLSocketFactory);
         return clientSSLSocketFactory;
     }
 
@@ -232,6 +273,23 @@ public final class TesterSupport {
             ks.load(is, JKS_PASS.toCharArray());
         }
         return ks;
+    }
+
+    /*
+     * Builds an in-memory key store containing the private key and certificate held in the given PEM files.
+     */
+    private static KeyStore getKeyStore(String certificatePem, String keyPem) throws Exception {
+        PEMFile certificateFile = new PEMFile(new File(certificatePem).getAbsolutePath());
+        PEMFile keyFile = new PEMFile(new File(keyPem).getAbsolutePath());
+        KeyStore ks = KeyStore.getInstance("JKS");
+        ks.load(null, null);
+        ks.setKeyEntry(CLIENT_ALIAS, keyFile.getPrivateKey(), JKS_PASS.toCharArray(),
+                certificateFile.getCertificates().toArray(new Certificate[0]));
+        return ks;
+    }
+
+    private static X509Certificate getCertificate(String certificatePem) throws Exception {
+        return new PEMFile(new File(certificatePem).getAbsolutePath()).getCertificates().get(0);
     }
 
     protected static boolean isClientRenegotiationSupported(Tomcat tomcat) {
@@ -258,6 +316,72 @@ public final class TesterSupport {
     public static void configureClientCertContext(Tomcat tomcat) {
         initSsl(tomcat);
 
+        X509Certificate caCert;
+        X509Certificate clientCert;
+        try {
+            caCert = (X509Certificate) getKeyStore(CA_JKS).getCertificate(CA_ALIAS);
+            clientCert = (X509Certificate) getKeyStore(CLIENT_JKS).getCertificate(CLIENT_ALIAS);
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+
+        configureClientCertContext(tomcat, caCert, clientCert);
+    }
+
+    /**
+     * Configures client certificate authentication for client certificates issued by the CA held in the given PEM
+     * file rather than by the default test CA. The server certificate is still loaded from the default key store.
+     *
+     * @param tomcat                The Tomcat instance to configure
+     * @param useOpenSSLTrust       If {@code true}, trust is configured via {@code caCertificateFile} so that OpenSSL
+     *                                  verifies the client certificates when an OpenSSL based implementation is used.
+     *                                  If {@code false}, trust is configured via a Java trust store.
+     * @param caCertificatePem      The PEM file containing the CA that issued the client certificates
+     * @param clientCertificatePems The PEM files containing the client certificates. A user is added to the Realm
+     *                                  for each client certificate and each user is assigned the standard role.
+     */
+    public static void configureClientCertContext(Tomcat tomcat, boolean useOpenSSLTrust, String caCertificatePem,
+            String... clientCertificatePems) {
+        initSsl(tomcat);
+
+        X509Certificate caCert;
+        X509Certificate[] clientCerts = new X509Certificate[clientCertificatePems.length];
+        KeyStore trustStore = null;
+        try {
+            caCert = getCertificate(caCertificatePem);
+            for (int i = 0; i < clientCertificatePems.length; i++) {
+                clientCerts[i] = getCertificate(clientCertificatePems[i]);
+            }
+            if (!useOpenSSLTrust) {
+                trustStore = KeyStore.getInstance("JKS");
+                trustStore.load(null, null);
+                trustStore.setCertificateEntry(CA_ALIAS, caCert);
+            }
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+
+        // Replace the default trust configuration
+        SSLHostConfig sslHostConfig = tomcat.getConnector().findSslHostConfigs()[0];
+        sslHostConfig.setTruststoreFile(null);
+        if (useOpenSSLTrust) {
+            sslHostConfig.setCaCertificateFile(new File(caCertificatePem).getAbsolutePath());
+            // There is no OCSP responder for the test certificates
+            OpenSSLConfCmd noOcspCheck = new OpenSSLConfCmd();
+            noOcspCheck.setName("NO_OCSP_CHECK");
+            noOcspCheck.setValue("true");
+            OpenSSLConf openSslConf = new OpenSSLConf();
+            openSslConf.addCmd(noOcspCheck);
+            sslHostConfig.setOpenSslConf(openSslConf);
+        } else {
+            sslHostConfig.setTrustStore(trustStore);
+        }
+
+        configureClientCertContext(tomcat, caCert, clientCerts);
+    }
+
+    private static void configureClientCertContext(Tomcat tomcat, X509Certificate caCert,
+            X509Certificate... clientCerts) {
         /* When running on Java 11, TLSv1.3 is enabled by default. The JSSE
          * implementation of TLSv1.3 does not support
          * certificateVerification="optional", a setting on which these tests
@@ -286,25 +410,14 @@ public final class TesterSupport {
         TesterMapRealm realm = new TesterMapRealm();
 
         // Get the CA subject the server should send us for client cert selection
-        try {
-            KeyStore ks = getKeyStore(CA_JKS);
-            X509Certificate cert = (X509Certificate)ks.getCertificate(CA_ALIAS);
-            clientAuthExpectedIssuer = cert.getSubjectX500Principal().toString();
-        } catch (Exception ex) {
-            throw new RuntimeException(ex);
-        }
+        clientAuthExpectedIssuer = caCert.getSubjectX500Principal().toString();
 
-        String cn = "NOTFOUND";
-        try {
-            KeyStore ks = getKeyStore(CLIENT_JKS);
-            X509Certificate cert = (X509Certificate)ks.getCertificate(CLIENT_ALIAS);
-            cn = cert.getSubjectX500Principal().toString();
-        } catch (Exception ex) {
-            throw new RuntimeException(ex);
+        // Add a user for each client certificate and assign each user the standard role
+        for (X509Certificate clientCert : clientCerts) {
+            String cn = clientCert.getSubjectX500Principal().toString();
+            realm.addUser(cn, "not used");
+            realm.addUserRole(cn, ROLE);
         }
-
-        realm.addUser(cn, "not used");
-        realm.addUserRole(cn, ROLE);
         ctx.setRealm(realm);
 
         // Configure the authenticator
