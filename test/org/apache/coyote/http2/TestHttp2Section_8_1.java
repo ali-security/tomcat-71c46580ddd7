@@ -16,6 +16,7 @@
  */
 package org.apache.coyote.http2;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,6 +28,10 @@ import org.apache.catalina.connector.Connector;
 import org.apache.catalina.startup.Tomcat;
 import org.apache.coyote.ContinueResponseTiming;
 import org.apache.tomcat.util.http.Method;
+import org.apache.tomcat.util.net.SSLHostConfig;
+import org.apache.tomcat.util.net.SSLHostConfigCertificate;
+import org.apache.tomcat.util.net.SSLHostConfigCertificate.Type;
+import org.apache.tomcat.util.net.TesterSupport;
 
 /**
  * Unit tests for Section 8.1 of <a href="https://tools.ietf.org/html/rfc7540">RFC 7540</a>. <br>
@@ -412,6 +417,116 @@ public class TestHttp2Section_8_1 extends Http2TestBase {
 
         String trace = output.getTrace();
         Assert.assertTrue(trace, trace.contains("0-Goaway-[1]-[9]"));
+    }
+
+
+    @Test
+    public void testSniAuthorityMatch() throws Exception {
+        // SNI localhost, :authority localhost - same SSLHostConfig
+        doTestSni(true, ":authority", "localhost", true, true);
+    }
+
+
+    @Test
+    public void testSniAuthorityMatchCase() throws Exception {
+        // SNI localhost, :authority LOCALHOST - same SSLHostConfig
+        doTestSni(true, ":authority", "LOCALHOST", true, true);
+    }
+
+
+    @Test
+    public void testSniAuthorityMismatch() throws Exception {
+        // SNI localhost, :authority foobar - different SSLHostConfig
+        doTestSni(true, ":authority", "foobar", true, false);
+    }
+
+
+    @Test
+    public void testSniAuthorityMismatchCase() throws Exception {
+        // SNI localhost, :authority FOOBAR - different SSLHostConfig
+        doTestSni(true, ":authority", "FOOBAR", true, false);
+    }
+
+
+    @Test
+    public void testSniHostHeaderMismatch() throws Exception {
+        // SNI localhost, host foobar - different SSLHostConfig
+        doTestSni(true, "host", "foobar", true, false);
+    }
+
+
+    @Test
+    public void testNoSniAuthorityMatch() throws Exception {
+        // No SNI (default SSLHostConfig), :authority localhost - default SSLHostConfig
+        doTestSni(false, ":authority", "localhost", true, true);
+    }
+
+
+    @Test
+    public void testNoSniAuthorityMismatch() throws Exception {
+        // No SNI (default SSLHostConfig), :authority foobar - different SSLHostConfig
+        doTestSni(false, ":authority", "foobar", true, false);
+    }
+
+
+    @Test
+    public void testSniAuthorityMismatchNotStrict() throws Exception {
+        // SNI localhost, :authority foobar - different SSLHostConfig but not checked
+        doTestSni(true, ":authority", "foobar", false, true);
+    }
+
+
+    private void doTestSni(boolean sendSni, String authorityHeaderName, String hostName, boolean strictSni,
+            boolean expectAllowed) throws Exception {
+        enableHttp2(true);
+
+        Connector connector = getTomcatInstance().getConnector();
+        Assert.assertTrue(connector.setProperty("strictSni", Boolean.toString(strictSni)));
+        if (sendSni) {
+            // Add a dedicated config for localhost, to be selected using SNI
+            addSslHostConfig(connector, "localhost");
+        }
+        // Add a dedicated config for foobar
+        addSslHostConfig(connector, "foobar");
+
+        configureAndStartWebApplication();
+        openClientConnection(true, true, sendSni ? "localhost" : null);
+        doHttpUpgrade();
+        sendClientPreface();
+        validateHttp2InitialResponse();
+
+        List<Header> headers = new ArrayList<>(4);
+        headers.add(new Header(":method", Method.GET));
+        headers.add(new Header(":scheme", "https"));
+        headers.add(new Header(":path", "/simple"));
+        headers.add(new Header(authorityHeaderName, hostName + ":" + getPort()));
+
+        byte[] headersFrameHeader = new byte[9];
+        ByteBuffer headersPayload = ByteBuffer.allocate(128);
+
+        buildGetRequest(headersFrameHeader, headersPayload, null, headers, 3);
+
+        writeFrame(headersFrameHeader, headersPayload);
+
+        parser.readFrame();
+
+        String trace = output.getTrace();
+        if (expectAllowed) {
+            Assert.assertTrue(trace, trace.contains("3-Header-[:status]-[200]"));
+        } else {
+            Assert.assertTrue(trace, trace.contains("0-Goaway-[1]-[9]"));
+        }
+    }
+
+
+    private static void addSslHostConfig(Connector connector, String hostName) {
+        SSLHostConfig sslHostConfig = new SSLHostConfig();
+        SSLHostConfigCertificate certificate = new SSLHostConfigCertificate(sslHostConfig, Type.UNDEFINED);
+        sslHostConfig.addCertificate(certificate);
+        certificate.setCertificateKeystoreFile(new File(TesterSupport.LOCALHOST_RSA_JKS).getAbsolutePath());
+        certificate.setCertificateKeystorePassword(TesterSupport.JKS_PASS);
+        sslHostConfig.setHostName(hostName);
+        connector.addSslHostConfig(sslHostConfig);
     }
 
 

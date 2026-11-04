@@ -37,6 +37,10 @@ import java.util.Map;
 import java.util.Random;
 
 import javax.net.SocketFactory;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -673,10 +677,24 @@ public abstract class Http2TestBase extends TomcatBaseTest {
     }
 
     protected void openClientConnection(boolean tls, boolean autoAckSettings) throws IOException {
+        openClientConnection(tls, autoAckSettings, null);
+    }
+
+    protected void openClientConnection(boolean tls, boolean autoAckSettings, String sniHostName)
+            throws IOException {
 
         SocketFactory socketFactory = tls ? TesterSupport.configureClientSsl() : SocketFactory.getDefault();
         // Open a connection
         s = socketFactory.createSocket("localhost", getPort());
+        if (tls && sniHostName != null) {
+            // Explicitly send the SNI host name in the TLS client hello
+            SSLSocket sslSocket = (SSLSocket) s;
+            List<SNIServerName> serverNames = new ArrayList<>(1);
+            serverNames.add(new SNIHostName(sniHostName));
+            SSLParameters params = sslSocket.getSSLParameters();
+            params.setServerNames(serverNames);
+            sslSocket.setSSLParameters(params);
+        }
         s.setSoTimeout(30000);
 
         os = new BufferedOutputStream(s.getOutputStream());
