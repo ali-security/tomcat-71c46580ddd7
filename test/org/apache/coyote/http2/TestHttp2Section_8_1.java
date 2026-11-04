@@ -28,6 +28,7 @@ import org.apache.catalina.connector.Connector;
 import org.apache.catalina.startup.Tomcat;
 import org.apache.coyote.ContinueResponseTiming;
 import org.apache.tomcat.util.http.Method;
+import org.apache.tomcat.util.http.MimeHeaders;
 import org.apache.tomcat.util.net.SSLHostConfig;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate;
 import org.apache.tomcat.util.net.SSLHostConfigCertificate.Type;
@@ -121,6 +122,55 @@ public class TestHttp2Section_8_1 extends Http2TestBase {
         Assert.assertEquals("Unexpected data in trace - " + trace, stream0WindowSize.length() +
                 stream3WindowSize.length() + stream3Headers.length() + stream3Body.length() + stream5Headers.length() +
                 stream5Body.length(), trace.length());
+    }
+
+
+    @Test
+    public void testPostWithInvalidTrailerHeaderValue() throws Exception {
+        http2Connect();
+        http2Protocol.setAllowedTrailerHeaders(TRAILER_HEADER_NAME);
+
+        // Disable overhead protection for window update as it breaks some tests
+        http2Protocol.setOverheadWindowUpdateThreshold(0);
+
+        byte[] headersFrameHeader = new byte[9];
+        ByteBuffer headersPayload = ByteBuffer.allocate(128);
+        byte[] dataFrameHeader = new byte[9];
+        ByteBuffer dataPayload = ByteBuffer.allocate(256);
+
+        // Trailers follow so the data frame must not end the stream
+        buildPostRequest(headersFrameHeader, headersPayload, false, dataFrameHeader, dataPayload, null, true, 3);
+
+        // Trailer field with a field value that contains CRLF
+        byte[] trailerFrameHeader = new byte[9];
+        ByteBuffer trailerPayload = ByteBuffer.allocate(256);
+        MimeHeaders trailerHeaders = new MimeHeaders();
+        trailerHeaders.addValue(TRAILER_HEADER_NAME).setString("a\r\nx-injected: b");
+        hpackEncoder.encode(trailerHeaders, trailerPayload);
+        trailerPayload.flip();
+        ByteUtil.setThreeBytes(trailerFrameHeader, 0, trailerPayload.limit());
+        trailerFrameHeader[3] = FrameType.HEADERS.getIdByte();
+        // Flags. end of headers (0x04) and end of stream (0x01)
+        trailerFrameHeader[4] = 0x05;
+        ByteUtil.set31Bits(trailerFrameHeader, 5, 3);
+
+        // Write the headers
+        writeFrame(headersFrameHeader, headersPayload);
+        // Body
+        writeFrame(dataFrameHeader, dataPayload);
+        // Trailers
+        writeFrame(trailerFrameHeader, trailerPayload);
+
+        // Window updates for the body (if any) then the stream reset
+        int count = 0;
+        while (count < 5 && !output.getTrace().contains("3-RST-") && !output.getTrace().contains("3-EndOfStream")) {
+            parser.readFrame();
+            count++;
+        }
+
+        String trace = output.getTrace();
+        Assert.assertTrue(trace, trace.contains("3-RST-[1]"));
+        Assert.assertFalse(trace, trace.contains("3-Header-[:status]-[200]"));
     }
 
 
